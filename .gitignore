@@ -1,0 +1,69 @@
+plt*
+chk*
+last_chk
+*.log
+compile_commands.json
+.vscode/
+*.hdf5
+
+# agent files
+/.claude
+/.agent
+/.agents
+
+# LaTeX files
+*.aux
+*.dbl
+*.bbl
+*.blg
+*.dep
+*.fdb_latexmk
+*.fls
+*.synctex.gz
+
+*.mp4
+*.pdf
+.DS_Store
+.cache
+
+# Acme output files
++Errors
+
+# image files
+*.png
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Fortran module files
+*.mod
+*.smod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# hdf5 files
+*.hdf5
+
+# outputs 
+outputs/
