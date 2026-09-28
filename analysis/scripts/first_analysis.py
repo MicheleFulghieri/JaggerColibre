@@ -8,10 +8,16 @@ import h5py
 from datetime import datetime
 
 
+# import resources# Converte iKB in Megabyte o Gigabyte
+# max_mem_kb = resource.getrusage(resource.RUSAGE_SELF).ru_max_rss
+# max_mem_gb = max_mem_kb / (1024 * 1024) if hasattr(resource, 'RUSAGE_SELF') else max_mem_kb / 1024
+
+# print(f"Picco massimo di RAM utilizzata dallo script: {max_mem_gb:.2f} GB")
+
 # ---------------------------------------------------------------------------
 # Useful paths
 # ---------------------------------------------------------------------------
-file_path = '/cosma8/data/dp004/colibre/Runs/L0012N0094/Thermal/snapshots/colibre_0000'
+file_path = '/cosma8/data/dp004/colibre/Runs/L0025N0188/Thermal/snapshots/colibre_0048/colibre_0048.hdf5'
 save_path = '/cosma8/data/do019/dc-fulg1/outputs/first_analysis'
 
 
@@ -106,8 +112,12 @@ def sample_and_plot_parts(nplot, pcoords, ax_n, ls='k.', ms=0.5, label=None):
 #  Gas, dm and star 2D histo
 # ---------------------------------------------------------------------------
 def histo2d_and_show_parts(pcoords, fig_histo, ax_histo, ptype, Lbox, nbins=200, absc=0, ord=1):
-   """Extract the (non-)weighted 2d nummpy histogram of the box distribution of particles and
+   """Extract the (non-)weighted 2d numpy histogram of the box distribution of particles and
       plot them"""
+
+   if pcoords is None or pcoords.shape[0] == 0:
+      print(f"     [WARNING] No {ptype} particles found in this snapshot. Generating no plot.")
+      return
    
    histo_2d, xedges, yedges = np.histogram2d(
       pcoords[:, absc],
@@ -116,7 +126,7 @@ def histo2d_and_show_parts(pcoords, fig_histo, ax_histo, ptype, Lbox, nbins=200,
       bins = nbins
    )
 
-   im_histo = ax_histo.imshow(histo_2d,
+   im_histo = ax_histo.imshow(histo_2d.T,       # .T since np.histogram2d returns X on rows and Y on cols
                               origin = 'lower',
                               extent = [0, Lbox[absc], 0, Lbox[ord]],
                               cmap = 'magma',
@@ -143,7 +153,7 @@ def main():
    # ---------------------------------------------------------------------------
    # Directories setup
    # ---------------------------------------------------------------------------
-   make_dirs("/data/mfulghieri/jagger/outputs/first_analysis")
+   make_dirs(save_path)
 
    # ---------------------------------------------------------------------------
    # Inspect and load the snapshot
