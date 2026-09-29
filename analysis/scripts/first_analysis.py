@@ -46,6 +46,43 @@ class ColibreSnapshot:
       self.redshift = self.header['Redshift'][0]
       self.box_size = self.header['BoxSize']
 
+   def inspect_particle_type(self, part_type):
+      """Prints all available datasets for a specific particle type in a 
+         tabular format, including Shape, Type, and Unit."""
+
+      if part_type not in self.f:
+         print(f"Error: {part_type} group not in this dataset")
+         return
+
+      group = self.f[part_type]
+      print(f"\n==============================================================")
+      print(f" DATASET INSPECTION FOR: {part_type.upper()} ({len(group.keys())} properties found)")
+      print(f"==============================================================")
+
+      # Table header
+      print(f"{'Dataset Name':<30} | {'Shape':<18} | {'Dtype':<10} | {'Notes/Unities'}")
+      print("-" * 80)
+
+      for ds_name in sorted(group.keys()):  # iteration of group dataset
+            ds = group[ds_name]
+
+            if isinstance(ds, h5py.Group):
+               print(f"{ds_name:<30} | {'[Sub-Group]':<18} | {'-':<10} | Sub-properties")
+               continue
+
+            unit_info = ""
+            if 'Conversion factor to CGS (not co-moving)' in ds.attrs:
+               cgs = ds.attrs['Conversion factor to CGS (not co-moving)']
+               cgs_val = cgs[0] if hasattr(cgs, '__len__') else cgs
+               unit_info = f"CGS conv: {cgs_val:.2e}"
+            elif 'Description' in ds.attrs:
+               unit_info = ds.attrs['Description']
+
+            # Print the table row
+            print(f"{ds_name:<30} | {str(ds.shape):<18} | {str(ds.dtype):<10} | {unit_info}")
+            
+      print("==============================================================\n")
+
    def print_snap_info(self):
       header = self.f['Header'].attrs
       
@@ -111,7 +148,7 @@ def sample_and_plot_parts(nplot, pcoords, ax_n, ls='k.', ms=0.5, label=None):
 # ---------------------------------------------------------------------------
 #  Gas, dm and star 2D histo
 # ---------------------------------------------------------------------------
-def histo2d_and_show_parts(pcoords, fig_histo, ax_histo, ptype, Lbox, nbins=200, absc=0, ord=1):
+def histo2d_and_show_parts(pcoords, fig_histo, ax_histo, ptype, Lbox, nbins=200, absc=0, ord=1, weights=None):
    """Extract the (non-)weighted 2d numpy histogram of the box distribution of particles and
       plot them"""
 
@@ -123,7 +160,8 @@ def histo2d_and_show_parts(pcoords, fig_histo, ax_histo, ptype, Lbox, nbins=200,
       pcoords[:, absc],
       pcoords[:, ord],
       range = [[0, Lbox[absc]], [0, Lbox[ord]]],
-      bins = nbins
+      bins = nbins,
+      weights = weights
    )
 
    im_histo = ax_histo.imshow(histo_2d.T,       # .T since np.histogram2d returns X on rows and Y on cols
@@ -158,13 +196,14 @@ def main():
    # ---------------------------------------------------------------------------
    # Inspect and load the snapshot
    # --------------------------------------------------------------------------- 
-   snap = ColibreSnapshot(file_path)                   # instantiating the class object
+   snap = ColibreSnapshot(file_path)                    # instantiating the class object
+   snap.inspect_particle_type('PartType0')
    snap.print_snap_info()
    L_box_Mpc = snap.box_size
    redshift  = snap.redshift
-   pgas  = snap.get_dataset('PartType0', 'Coordinates')  # (6573595, 3) array with (x, y, z) for each part
+   pgas  = snap.get_dataset('PartType0', 'Coordinates')  # (6631389, 3) array with (x, y, z) for each part
    pdm   = snap.get_dataset('PartType1', 'Coordinates')  # (26578688, 3)
-   pstar = snap.get_dataset('PartType4', 'Coordinates')  # (70698, 3)
+   pstar = snap.get_dataset('PartType4', 'Coordinates')  # (13156, 3)
    snap.close()
 
    # ---------------------------------------------------------------------------
