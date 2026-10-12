@@ -1,25 +1,37 @@
-import matplotlib.pyplot as plt
+import argparse
+import os
+import sys
+from datetime import datetime
+from operator import attrgetter
+
 import matplotlib
 matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 import numpy as np
-import os
-from operator import attrgetter
 import h5py
 import unyt
 import astropy.units as u
-from datetime import datetime
+from astropy import constants as const 
 import swiftsimio as sw
 
 
 # ---------------------------------------------------------------------------
-# Useful paths
+# CLI
 # ---------------------------------------------------------------------------
-snap_dir      = '/cosma8/data/dp004/colibre/Runs'
-run_dir       = 'L0025N0188/Thermal'
-snap_nr       = 48  # z = 5.0
-snap_filename = f'{snap_dir}/{run_dir}/SOAP-HBT/colibre_with_SOAP_membership_{snap_nr:04}.hdf5'
-save_path     = '/cosma8/data/do019/dc-fulg1/outputs/swiftsimio_analysis'
+DEFAULT_SNAP_DIR = "/cosma8/data/dp004/colibre/Runs"
+DEFAULT_SAVE_DIR = "/cosma8/data/do019/dc-fulg1/outputs/swiftsimio_analysis"
+
+def parse_args():
+    """Command-line options: which run/snapshot to analyse and where to save."""
+    p = argparse.ArgumentParser(description="Analyse a COLIBRE snapshot for JAGGER")
+    p.add_argument("--run", default="L0025N0188/Thermal",   # default light
+                   help="run directory relative to --snap-dir (e.g. L0025N0188/Thermal)")
+    p.add_argument("--snap", type=int, required=True,
+                   help="snapshot number (L025_m5: 44 z=5.5, 48 z=5.0, 52 z=4.5, 56 z=4.0)")
+    p.add_argument("--snap-dir", default=DEFAULT_SNAP_DIR, help="root of the COLIBRE runs")
+    p.add_argument("--save", default=DEFAULT_SAVE_DIR, help="root output directory")
+    return p.parse_args()
 
 
 
@@ -176,12 +188,100 @@ def print_HI_budget(gas, m_HI, cosmo, boxsize):
     print(f"     Omega_HI                       :     {Omega_HI:.3e}")
 
 
+def slab_absorption_distance(thickness_cMpc, cosmo, z):
+    # Relation in Fumagalli et al. (2013), from Bahcall & Peebles (1969)
+    """Absorption distance of a slab of comoving thickness Delta_chi at redshift z:
+       dX = (1+z)^2 H0/H(z) dz  and  dz = H(z) dchi / c   ->   Delta_X = (1+z)^2 H0 Delta_chi / c"""
+    delta_chi = thickness_cMpc * u.Mpc                       # float -> astropy Quantity
+    # .decompose() simplify the units
+    return ((1 + z)**2 * cosmo.H0 * delta_chi / const.c).decompose().value
+
+
+# ---------------------------------------------------------------------------
+# Chemical and metal inspection
+# ---------------------------------------------------------------------------
+# Solar photospheric abundances 12 + log10(n_X/n_H), Asplund et al. (2009), Table 1
+SOLAR_LOG_EPS = {"hydrogen": 12.00, "helium": 10.93, "carbon": 8.43, "nitrogen": 7.83, "oxygen": 8.69,
+                "neon": 7.93, "magnesium": 7.60, "silicon": 7.51, "iron": 7.50}
+# Standard atomic weights [amu]
+ATOMIC_MASS = {"hydrogen": 1.008, "helium": 4.003, "carbon": 12.011, "nitrogen": 14.007, "oxygen": 15.999,
+            "neon": 20.180, "magnesium": 24.305, "silicon": 28.085, "iron": 55.845}
+METALS = ["carbon", "nitrogen", "oxygen", "neon", "magnesium", "silicon", "iron"]
+
+def print_metal_budget(gas, snap_filename):
+    """Per metal: total mass, dust fraction, closure X_tot = X_diffuse + X_dust, enriched mass fraction.
+    X_dust,el = sum_g D_g * M[g, el], M = GrainToElementMapping (grain -> element mass fractions)."""
+    with h5py.File(snap_filename, "r") as f:
+        grain_to_element = f["SubgridScheme/GrainToElementMapping"][:]            # (6 grains, 12 elements)
+    elements = gas.element_mass_fractions.named_columns                          # same order as the matrix columns
+    D = np.column_stack([getattr(gas.dust_mass_fractions, g).value.astype(np.float64)
+                        for g in gas.dust_mass_fractions.named_columns])        # (N particles, 6 grains)
+    m = gas.masses.to("Msun").value.astype(np.float64)
+
+    print(f"\n[+] Metal budget (mass weighted)")
+    print(f"     {'element':<10} {'M_el [Msun]':>12} {'f_dust':>9} {'closure':>9} {'f_enriched':>11}")
+    for i, el in enumerate(elements):
+        if el not in METALS:
+            continue
+        X_tot  = getattr(gas.element_mass_fractions, el).value.astype(np.float64)
+        X_dif  = getattr(gas.element_mass_fractions_diffuse, el).value.astype(np.float64)
+        X_dust = D @ grain_to_element[:, i]                                        # matrix-vector product
+        M_tot  = np.sum(m * X_tot)
+        print(f"     {el:<10} {M_tot:12.3e} {np.sum(m * X_dust) / M_tot:9.3e} "
+            f"{np.sum(m * (X_dif + X_dust)) / M_tot:9.4f} {np.sum(m[X_tot > 0]) / np.sum(m):11.3e}")
+
+    Z = gas.metal_mass_fractions.value.astype(np.float64)
+    M_Z = np.sum(m * Z)
+    for label, field in [("SNII", gas.metal_mass_fractions_from_snii), ("SNIa", gas.metal_mass_fractions_from_snia),
+                        ("AGB", gas.metal_mass_fractions_from_agb)]:
+        print(f"     Metal mass from {label:<5}         :     {np.sum(m * field.value.astype(np.float64)) / M_Z:.3e}")
+
+# Abundances per particles
+def number_ratio(gas, element, diffuse=False):
+    """n_X / n_H of each particle (float64). diffuse=False: gas + dust; diffuse=True: gas phase only."""
+    fractions = gas.element_mass_fractions_diffuse if diffuse else gas.element_mass_fractions
+    X_el = getattr(fractions, element).value.astype(np.float64)
+    X_H  = gas.element_mass_fractions.hydrogen.value.astype(np.float64)
+    return (X_el / ATOMIC_MASS[element]) / (X_H / ATOMIC_MASS["hydrogen"])
+
+def bracket(ratio, element, reference="hydrogen"):
+    """[X/Y] = log10(n_X/n_Y) - log10(n_X/n_Y)_sun. Pristine gas (ratio = 0) -> -inf, 0/0 -> nan."""
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.log10(ratio) - (SOLAR_LOG_EPS[element] - SOLAR_LOG_EPS[reference])
+
+def depletion(gas, element):
+    """delta_X = log10(X_diffuse / X_total) of each particle: 0 = no dust, -1 = 90% of X locked in grains.
+       Pristine gas (0/0) -> nan."""
+    X_tot = getattr(gas.element_mass_fractions, element).value.astype(np.float64)
+    X_dif = getattr(gas.element_mass_fractions_diffuse, element).value.astype(np.float64)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.log10(X_dif / X_tot)
+
+def element_column_density(snap, element, diffuse=True, neutral=False, **slab_kwargs):
+    """Column density N_X [cm^-2, physical] of an element in the slab.
+       neutral=True: only the X atoms associated with HI (m_X * f_HI). For oxygen this is the OI proxy
+       (charge exchange keeps x_OI ~ x_HI); for other elements it is NOT an ion column."""
+    fractions = snap.gas.element_mass_fractions_diffuse if diffuse else snap.gas.element_mass_fractions
+    mass_X = getattr(fractions, element) * snap.gas.masses
+    if neutral:
+        mass_X = mass_X * snap.gas.species_fractions.HI
+    tmp_name = f"_tmp_m_{element}"
+    setattr(snap.gas, tmp_name, mass_X)
+    try:
+        sigma = compute_projection_map(snap, field=tmp_name, weight=None, physical=False, **slab_kwargs)
+    finally:
+        delattr(snap.gas, tmp_name)
+    return (sigma.to_physical().to("g/cm**2") / (ATOMIC_MASS[element] * unyt.amu)).to("cm**-2")
+
+
 # ---------------------------------------------------------------------------
 # Weighted statistics of particle quantities
 # ---------------------------------------------------------------------------
 def weighted_percentiles(values, weights, percentiles=(16, 50, 84)):
     """Percentiles of values in which each element counts proportionally to its weight."""
 
+    ok = np.isfinite(values) & (weights > 0)
+    values, weights = values[ok], weights[ok]
     order = np.argsort(values)                    # indices that sort values
     cum_w = np.cumsum(weights[order])             # cumulative weight along the sorted values
     cum_w /= cum_w[-1]                            # normalised to [0, 1]
@@ -196,13 +296,40 @@ def print_weighted_statistics(quantities, weights):
     print(f"\n[+] Weighted percentiles of particle quantities:")
     for w_label, w_values in weights.items():
         print(f"\n     weight = {w_label}")
-        print(f"     {'quantity':<{w}}  {'16th':>10} {'50th':>10} {'84th':>10}")
-        print("     " + "-"*(w + 35))
+        print(f"     {'quantity':<{w}}  {'16th':>10} {'50th':>10} {'84th':>10} {'f_fin':>7}")
+        print("     " + "-"*(w + 43))
         for q_label, q_values in quantities.items():
+            ok    = np.isfinite(q_values) & (w_values > 0)
+            f_fin = w_values[ok].sum() / w_values.sum()      # weight fraction with a finite value (e.g. enriched gas)
+            if not ok.any():
+                print(f"     {q_label:<{w}}  {'no finite values':>32}")
+                continue
             p16, p50, p84 = weighted_percentiles(q_values, w_values)
-            print(f"     {q_label:<{w}}  {p16:10.3e} {p50:10.3e} {p84:10.3e}")
+            print(f"     {q_label:<{w}}  {p16:10.3e} {p50:10.3e} {p84:10.3e} {f_fin:7.3f}")
 
 
+ABSORBER_CLASSES = {"forest": (-np.inf, 17.2), "LLS": (17.2, 19.0), "subDLA": (19.0, 20.3), "DLA": (20.3, np.inf)}
+
+def print_absorber_classes(logN_HI, maps):
+    """Covering fraction and 16/50/84th percentiles of each map (e.g. [O/H]_HI, [Si/O]) per N_HI class.
+       maps: {label: 2D numpy array}, same shape as logN_HI. Non-finite pixels (pristine) are excluded and counted."""
+    print(f"\n[+] Absorber classes (pixel statistics)")
+    for name, (lo, hi) in ABSORBER_CLASSES.items():
+        sel = (logN_HI >= lo) & (logN_HI < hi)
+        print(f"\n     {name}: covering fraction = {sel.mean():.3e}")
+        for label, m in maps.items():
+            v = m[sel]
+            v = v[np.isfinite(v)]
+            if v.size == 0:
+                print(f"       {label:<12} no enriched pixels")
+                continue
+            p16, p50, p84 = np.percentile(v, [16, 50, 84])
+            print(f"       {label:<12} {p16:8.2f} {p50:8.2f} {p84:8.2f}   (enriched: {v.size / sel.sum():.2f})")
+
+
+# ---------------------------------------------------------------------------
+# Plots
+# ---------------------------------------------------------------------------
 def plot_phase_diagram(ax, n_H, T, weights, cbar_label, bins=200, ranges=((-8, 4), (1, 9))):
     """log n_H - log T 2D histogram: each cell is the fraction of the total weight it contains."""
 
@@ -238,6 +365,44 @@ def plot_column_density_pixels(ax, N_HI_map, bins=np.arange(12, 23.01, 0.1)):
     return np.mean(N_HI >= N_HI_LLS), np.mean(N_HI >= N_HI_DLA)  # covering LLS and DLA fraction
 
 
+def plot_abundance_map(image, ax, Lbox, cbar_label, vmin=-4, vmax=0, cmap="RdYlBu_r"):
+    """Draw a 2D abundance map [X/Y] (numpy array indexed [ix, iy]) in linear scale.
+       Pristine pixels (non-finite values) are shown in grey."""
+
+    cmap = plt.get_cmap(cmap).copy()
+    cmap.set_bad("lightgrey")
+    image = np.where(np.isfinite(image), image, np.nan)   # -inf (pristine) -> nan -> 'bad' colour
+
+    im = ax.imshow(image.T, origin='lower', extent=[0, Lbox[0], 0, Lbox[1]], cmap=cmap, vmin=vmin, vmax=vmax)
+    ax.set_box_aspect(1)
+    ax.set_xlabel(r'$\rm X \ [ cMpc ]$')
+    ax.set_ylabel(r'$\rm Y \ [ cMpc ]$')
+    cbar = ax.figure.colorbar(mappable=im, ax=ax, orientation='vertical', pad=0.04)
+    cbar.set_label(cbar_label, fontsize=12)
+
+    return im
+
+
+def plot_class_histograms(ax, logN_HI, image, xlabel, bins=np.arange(-6, 1.01, 0.1)):
+    """Normalised pixel distribution of a map (e.g. [O/H]_HI) for each optically thick N_HI class.
+       Only enriched (finite) pixels enter the histogram. Values outside the bin range are piled up
+       in the first/last bin (display only); the fraction below the range is given in the legend."""
+
+    for name in ["LLS", "subDLA", "DLA"]:
+        lo, hi = ABSORBER_CLASSES[name]
+        sel = (logN_HI >= lo) & (logN_HI < hi)
+        v = image[sel]
+        v = v[np.isfinite(v)]
+        if v.size == 0:
+            continue
+        f_below = np.mean(v < bins[0])
+        ax.hist(np.clip(v, bins[0], bins[-1]), bins=bins, histtype='step', density=True, lw=1.5,
+                label=f"{name}: {sel.sum()} pix, below {bins[0]:.0f}: {f_below:.2f}")
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel('Pixel PDF')
+    ax.legend(fontsize=9)
+
+
 
 # ---------------------------------------------------------------------------
 # MAIN
@@ -246,6 +411,12 @@ def main():
     # ---------------------------------------------------------------------------
     # Directory setting up
     # ---------------------------------------------------------------------------
+    args = parse_args()
+    snap_filename = os.path.join(args.snap_dir, args.run, "SOAP-HBT",
+                                f"colibre_with_SOAP_membership_{args.snap:04d}.hdf5")
+    if not os.path.isfile(snap_filename):
+        sys.exit(f"Snapshot not found: {snap_filename}")      # message on stderr, exit code 1
+    save_path = os.path.join(args.save, args.run.replace("/", "_"), f"snap_{args.snap:04d}")
     make_dirs(save_path)
 
     # ---------------------------------------------------------------------------
@@ -255,15 +426,19 @@ def main():
     meta = snap.metadata                       # metadata method
     L_box    = meta.boxsize.to('Mpc').value
     cosmo    = meta.cosmology                  # astropy w0waCDM object
+    H_z = meta.cosmology.H(meta.z)             # Hubble parameter H(z_snap) km/s/Mpc
     redshift = meta.z
     time     = meta.t.to('Myr').value
     res      = 1024                            # pixels per side of the maps
 
-    print(f"\n----------- Inspecting the Colibre snapshot {run_dir} -----------")
+    
+
+    print(f"\n----------- Inspecting the Colibre snapshot {args.run} -----------")
     print(f"     Available groups               :     {snap}")
     print(f"     Box size                       :     {meta.boxsize}")
     print(f"     Cosmic Time                    :     {time:.3f} Myr")
     print(f"     Redshift (scale factor)        :     {meta.z:.2f} ({meta.a:.2f})")
+    print(f"     Hubble parameter H(z)          :     {H_z:.2f}")
     print(f"     Number of Gas particles        :     {meta.n_gas}")
     print(f"     Number of DM particles         :     {meta.n_dark_matter}")
     print(f"     Number of stellar particles    :     {meta.n_stars}")
@@ -343,13 +518,15 @@ def main():
 
     # ---- HI maps in a slab: N_HI and HI-weighted properties ----
     slab_thickness = 2.0    # cMpc: avoid summing unrelated absorbers along the whole box
-    z_c = 0.5 * L_box[2]
-    slab_region = sw.cosmo_array([0, L_box[0], 0, L_box[1], z_c - slab_thickness/2, z_c + slab_thickness/2], "Mpc",
+    z_box_c = 0.5 * L_box[2]
+    slab_region = sw.cosmo_array([0, L_box[0], 0, L_box[1], z_box_c - slab_thickness/2, z_box_c + slab_thickness/2], "Mpc",
                                  comoving=True, scale_factor=meta.a, scale_exponent=1)
     slab_kwargs = dict(resolution=res, region=slab_region, parallel=True)
 
     # Sigma_HI (comoving), also used as denominator of the HI-weighted maps
     sigma_HI = compute_projection_map(snap, field="m_HI", weight=None, physical=False, **slab_kwargs)
+    # ---- Check: HI mass conservation and N_HI conversion in the slab ----
+    z_pos   = snap.gas.coordinates[:, 2].to_comoving().to("Mpc").value
     N_HI     = (sigma_HI.to_physical().to("g/cm**2") / hydrogen_mass).to("cm**-2")        # HI atoms per physical cm^2
 
     nH_HI = compute_projection_map(snap, field="n_H",          weight="m_HI", weight_map=sigma_HI, **slab_kwargs)
@@ -361,7 +538,8 @@ def main():
     plot_projection_map(nH_HI, axs[0, 1], Lbox=L_box, units='cm**-3', cbar_label=r'$\langle n_{\rm H} \rangle_{\rm HI} \ [\rm cm^{-3}]$', cmap='magma')
     plot_projection_map(T_HI,  axs[1, 0], Lbox=L_box, units='K',      cbar_label=r'$\langle T \rangle_{\rm HI} \ [\rm K]$', cmap='inferno')
     plot_projection_map(Z_HI,  axs[1, 1], Lbox=L_box, units='dimensionless', cbar_label=r'$\langle Z \rangle_{\rm HI} \ / \ Z_\odot$', cmap='cividis')
-    fig.suptitle(rf'Slab $\Delta z$ = {slab_thickness} cMpc centred at z = {z_c:.1f} cMpc  (redshift {redshift:.2f})')
+    fig.suptitle(rf'Slab: $\Delta L$ = {slab_thickness:.1f} cMpc, centred at $z_{{\rm box}}$ = {z_box_c:.1f} cMpc '
+             rf'(redshift $z$ = {redshift:.2f})')
     fig.tight_layout()
     fig.savefig(os.path.join(save_path, "Visualization2D", "Gas_xy2d_HI_slab_maps.png"), dpi=300)
     plt.close(fig)
@@ -369,13 +547,127 @@ def main():
     # ---- Pixel distribution of N_HI in the slab ----
     fig, ax = plt.subplots()
     f_LLS, f_DLA = plot_column_density_pixels(ax, N_HI)
-    ax.set_title(rf'Slab $\Delta z$ = {slab_thickness} cMpc, {res}$^2$ pixels')
+    ax.set_title(rf'Slab $\Delta L$ = {slab_thickness} cMpc, {res}$^2$ pixels')
     fig.savefig(os.path.join(save_path, "Diagnostics", "Gas_NHI_pixel_distribution.png"), dpi=300)
     plt.close(fig)
 
     print(f"\n[+] Slab N_HI map ({slab_thickness} cMpc, {res}^2 pixels):")
     print(f"     Pixel fraction N_HI >= LLS     :     {f_LLS:.3e}")
     print(f"     Pixel fraction N_HI >= DLA     :     {f_DLA:.3e}")
+    in_slab = (z_pos >= z_box_c - slab_thickness/2) & (z_pos <= z_box_c + slab_thickness/2)
+    M_HI_part = m_HI.to("Msun").value[in_slab].sum(dtype=np.float64)
+    A_pix     = (L_box[0] / res) * (L_box[1] / res)                            # comoving Mpc^2
+    M_HI_map  = sigma_HI.to_comoving().to("Msun/Mpc**2").value.sum(dtype=np.float64) * A_pix
+    print(f"     M_HI map / particles           :     {M_HI_map / M_HI_part:.4f}")
+
+    # ---- Absorption distance for LLS and the DLA (assuming random poissonian distribution of absorbers) ----
+    dX    = slab_absorption_distance(slab_thickness, cosmo, redshift)
+    l_LLS = -np.log(1 - f_LLS) / dX        # Poisson: P(>=1 absorber in dX) = 1 - exp(-l dX)
+    l_DLA = -np.log(1 - f_DLA) / dX
+    print(f"     Slab absorption distance dX    :     {dX:.4f}")
+    print(f"     l_LLS(X) = dN/dX               :     {l_LLS:.3e}")
+    print(f"     l_DLA(X) = dN/dX               :     {l_DLA:.3e}")
+
+
+    # --- Chemical and metal inspection ----
+    print_metal_budget(snap.gas, snap_filename)
+
+    # ---- M2: particle abundances (gas phase = diffuse, i.e. what absorption lines see before dust correction) ----
+    ratio = {el: number_ratio(snap.gas, el, diffuse=True) for el in ["oxygen", "carbon", "silicon", "magnesium", "iron"]}
+    z_enrich = snap.gas.mean_metal_weighted_redshifts.value.astype(np.float64)
+    with np.errstate(divide="ignore", invalid="ignore"):        # 0/0 in pristine gas -> nan
+        abundances = {
+            "[O/H] total"   : bracket(number_ratio(snap.gas, "oxygen", diffuse=False), "oxygen"),
+            "[O/H] gas"     : bracket(ratio["oxygen"],    "oxygen"),
+            "[C/H] gas"     : bracket(ratio["carbon"],    "carbon"),
+            "[Si/H] gas"    : bracket(ratio["silicon"],   "silicon"),
+            "[Mg/H] gas"    : bracket(ratio["magnesium"], "magnesium"),
+            "[Fe/H] gas"    : bracket(ratio["iron"],      "iron"),
+            "[C/O] gas"     : bracket(ratio["carbon"]  / ratio["oxygen"], "carbon",  "oxygen"),
+            "[Si/O] gas"    : bracket(ratio["silicon"] / ratio["oxygen"], "silicon", "oxygen"),
+            "[Fe/O] gas"    : bracket(ratio["iron"]    / ratio["oxygen"], "iron",    "oxygen"),
+            "delta_O"       : depletion(snap.gas, "oxygen"),
+            "delta_Si"      : depletion(snap.gas, "silicon"),
+            "delta_Fe"      : depletion(snap.gas, "iron"),
+            "z_enrich"      : np.where(z_enrich >= 0, z_enrich, np.nan),    # -1 = never enriched -> nan
+        }
+    m_gas = snap.gas.masses.to("Msun").value.astype(np.float64)
+    abundance_weights = {
+        "gas mass"   : m_gas,
+        "HI mass"    : weights["HI mass"],
+        "metal mass" : m_gas * snap.gas.metal_mass_fractions.value.astype(np.float64),   # natural weight for z_enrich
+    }
+    print_weighted_statistics(abundances, abundance_weights)
+
+    was_in_ISM = snap.gas.last_ismscale_factors.value > 0     # -1 = never part of the ISM
+    print(f"\n[+] Gas that has been part of the ISM (recycled / outflow tracer):")
+    for w_label, w_values in abundance_weights.items():
+        print(f"     {w_label + ' fraction':<31}:     {w_values[was_in_ISM].sum() / w_values.sum():.3e}")
+    del ratio, abundances
+
+    # ---- M3: element column densities in the slab ----
+    N_H     = element_column_density(snap, "hydrogen",  diffuse=False, **slab_kwargs)
+    N_O     = element_column_density(snap, "oxygen",    diffuse=False, **slab_kwargs)   # all O atoms (gas + dust)
+    N_O_gas = element_column_density(snap, "oxygen",    diffuse=True,  **slab_kwargs)
+    N_OI    = element_column_density(snap, "oxygen",    diffuse=True, neutral=True, **slab_kwargs)   # OI proxy (x_OI = x_HI)
+    N_C     = element_column_density(snap, "carbon",    diffuse=True,  **slab_kwargs)
+    N_Si    = element_column_density(snap, "silicon",   diffuse=True,  **slab_kwargs)
+    N_Fe    = element_column_density(snap, "iron",      diffuse=True,  **slab_kwargs)
+    N_Fe_tot = element_column_density(snap, "iron",     diffuse=False, **slab_kwargs)
+
+    # plain float64 numpy maps [cm^-2] for the ratios
+    col = {name: N.to("cm**-2").value.astype(np.float64) for name, N in
+           [("HI", N_HI), ("H", N_H), ("O", N_O), ("O_gas", N_O_gas), ("OI", N_OI),
+            ("C", N_C), ("Si", N_Si), ("Fe", N_Fe), ("Fe_tot", N_Fe_tot)]}
+    with np.errstate(divide="ignore", invalid="ignore"):
+        logN_HI = np.log10(col["HI"])
+        abundance_maps = {
+            "[O/H]_HI"  : bracket(col["OI"] / col["HI"], "oxygen"),           # neutral-gas metallicity (OI/HI-like)
+            "[O/H]_col" : bracket(col["O"]  / col["H"],  "oxygen"),           # true column metallicity
+            "[C/O]"     : bracket(col["C"]  / col["O_gas"], "carbon",  "oxygen"),
+            "[Si/O]"    : bracket(col["Si"] / col["O_gas"], "silicon", "oxygen"),
+            "[Fe/O]"    : bracket(col["Fe"] / col["O_gas"], "iron",    "oxygen"),
+            "delta_Fe"  : np.log10(col["Fe"] / col["Fe_tot"]),
+        }
+
+    # Checks: OI proxy cannot exceed all oxygen; oxygen mass is conserved by the projection
+    A_pix_phys = (A_pix * unyt.Mpc**2 * meta.a**2).to("cm**2").value                # physical pixel area
+    X_O_all    = snap.gas.element_mass_fractions.oxygen.value.astype(np.float64)
+    M_O_part   = np.sum((m_gas * X_O_all)[in_slab])
+    M_O_map    = (col["O"].sum() * A_pix_phys * ATOMIC_MASS["oxygen"] * unyt.amu).to("Msun").value
+    print(f"\n[+] Slab element columns ({slab_thickness} cMpc, {res}^2 pixels):")
+    print(f"     M_O map / particles            :     {M_O_map / M_O_part:.4f}")
+    print(f"     Pixels with N_OI > N_O         :     {np.mean(col['OI'] > col['O'] * (1 + 1e-4)):.3e}")
+    for name in ["OI", "C", "Si", "Fe"]:
+        print(f"     max log N_{name:<6} [cm^-2]          :     {np.log10(col[name].max()):.2f}")
+
+    fig, axs = plt.subplots(2, 3, figsize=(18, 10))
+    plot_projection_map(N_HI, axs[0, 0], Lbox=L_box, units='cm**-2', cbar_label=r'$N_{\rm HI} \ [\rm cm^{-2}]$', cmap='viridis', vmin=1e12)
+    plot_projection_map(N_OI, axs[0, 1], Lbox=L_box, units='cm**-2', cbar_label=r'$N_{\rm OI}^{\rm proxy} \ [\rm cm^{-2}]$', cmap='viridis', vmin=1e6)
+    plot_abundance_map(abundance_maps["[O/H]_HI"], axs[0, 2], Lbox=L_box, cbar_label=r'$[\rm O/H]_{\rm HI}$')
+    plot_projection_map(N_C,  axs[1, 0], Lbox=L_box, units='cm**-2', cbar_label=r'$N_{\rm C}^{\rm gas} \ [\rm cm^{-2}]$', cmap='cividis', vmin=1e8)
+    plot_projection_map(N_Si, axs[1, 1], Lbox=L_box, units='cm**-2', cbar_label=r'$N_{\rm Si}^{\rm gas} \ [\rm cm^{-2}]$', cmap='cividis', vmin=1e7)
+    plot_projection_map(N_Fe, axs[1, 2], Lbox=L_box, units='cm**-2', cbar_label=r'$N_{\rm Fe}^{\rm gas} \ [\rm cm^{-2}]$', cmap='cividis', vmin=1e7)
+    fig.suptitle(rf'Metals in the slab: $\Delta L$ = {slab_thickness:.1f} cMpc (redshift $z$ = {redshift:.2f}); white/grey = pristine (X = 0)')
+    fig.tight_layout()
+    fig.savefig(os.path.join(save_path, "Visualization2D", "Metals_xy2d_slab_columns.png"), dpi=300)
+    plt.close(fig)
+
+    # ---- M4: absorber classes ----
+    print_absorber_classes(logN_HI, abundance_maps)
+
+    fig, axs = plt.subplots(1, 3, figsize=(17, 5))
+    plot_class_histograms(axs[0], logN_HI, abundance_maps["[O/H]_HI"], r'$[\rm O/H]_{\rm HI}$')
+    plot_class_histograms(axs[1], logN_HI, abundance_maps["[Si/O]"],   r'$[\rm Si/O]_{\rm gas}$', bins=np.arange(-2, 1.01, 0.05))
+    plot_class_histograms(axs[2], logN_HI, abundance_maps["[Fe/O]"],   r'$[\rm Fe/O]_{\rm gas}$', bins=np.arange(-2, 1.01, 0.05))
+    fig.suptitle(rf'Metallicity of optically thick absorbers (slab {slab_thickness:.1f} cMpc, redshift $z$ = {redshift:.2f})')
+    fig.tight_layout()
+    fig.savefig(os.path.join(save_path, "Diagnostics", "Metals_abundances_by_absorber_class.png"), dpi=300)
+    plt.close(fig)
+
+
+
+
 
 
     print(f"\nAll done. End at {datetime.now().time()}")
