@@ -7,7 +7,7 @@ from operator import attrgetter
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.colors import LogNorm
+from matplotlib.colors import LogNorm, Normalize
 import numpy as np
 import h5py
 import unyt
@@ -51,10 +51,28 @@ N_HI_DLA      = 2e20               # cm^-2, damped Lyman-alpha threshold (Wolfe 
 # ---------------------------------------------------------------------------
 # Output directory setup
 # ---------------------------------------------------------------------------
+# One sub-folder per topic, numbered in the order of the analysis
+FIG_DIRS = {
+    "gas"        : "01_Gas",                               # full-box maps, phase diagrams
+    "HI"         : "02_HI",                                # slab HI maps, N_HI distribution
+    "metal_maps" : os.path.join("03_Metals", "Maps"),      # slab column and abundance maps
+    "metal_diag" : os.path.join("03_Metals", "Diagnostics"),   # distributions, absorber classes
+}
+
 def make_dirs(base):
-    subdirs = ["Visualization2D", "Diagnostics"]
-    for d in subdirs:
+    for d in FIG_DIRS.values():
         os.makedirs(os.path.join(base, d), exist_ok=True)
+
+def fig_path(base, topic, filename):
+    """Full path of a figure: base / FIG_DIRS[topic] / filename."""
+    return os.path.join(base, FIG_DIRS[topic], filename)
+
+def save_figure(fig, base, topic, filename, dpi=300):
+    """Save fig in base / FIG_DIRS[topic] / filename, close it and print the path in the log."""
+    path = fig_path(base, topic, filename)
+    fig.savefig(path, dpi=dpi)
+    plt.close(fig)
+    print(f"     [saved] {path}")
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +154,7 @@ def plot_projection_map(proj_map, ax, Lbox, units, cbar_label, cmap="magma", log
                    origin = 'lower',
                    extent = [0, Lbox[0], 0, Lbox[1]],
                    cmap   = cmap,
-                   norm   = LogNorm(vmin=vmin, vmax=vmax) if log else None)
+                   norm   = LogNorm(vmin=vmin, vmax=vmax) if log else Normalize(vmin=vmin, vmax=vmax))
 
     ax.set_box_aspect(1)
     ax.set_xlabel(r'$\rm X \ [ cMpc ]$')
@@ -403,6 +421,54 @@ def plot_class_histograms(ax, logN_HI, image, xlabel, bins=np.arange(-6, 1.01, 0
     ax.legend(fontsize=9)
 
 
+def plot_weighted_pdf(ax, values, weights, bins, xlabel):
+    """Distribution of a particle quantity for several weights (dict {label: array}).
+       Each curve is normalised over the particles with a finite value; values outside the bins are
+       piled up in the first/last bin (display only) and the fraction below the range is in the legend."""
+
+    for w_label, w_values in weights.items():
+        ok = np.isfinite(values) & (w_values > 0)
+        v, w = values[ok], w_values[ok]
+        f_below = w[v < bins[0]].sum() / w.sum()
+        ax.hist(np.clip(v, bins[0], bins[-1]), bins=bins, weights=w, histtype='step', density=True, lw=1.5,
+                label=f"{w_label} (below {bins[0]:.0f}: {f_below:.2f})")
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel('PDF')
+    ax.legend(fontsize=9)
+
+
+def plot_hist2d(ax, x, y, x_bins, y_bins, xlabel, ylabel, weights=None, conditional=False):
+    """Weighted 2D histogram of (x, y).
+       conditional=False: each cell = fraction of the total weight (joint distribution, like the phase diagram).
+       conditional=True : each column normalised to 1, i.e. P(y | x); white line = median of y per column.
+       y = -inf (pristine) is piled up in the lowest y bin (display only)."""
+
+    w  = np.ones_like(x) if weights is None else weights
+    ok = np.isfinite(x) & ~np.isnan(y) & (w > 0)
+    x, y, w = x[ok], np.clip(y[ok], y_bins[0], y_bins[-1]), w[ok]
+
+    hist, xe, ye = np.histogram2d(x, y, bins=[x_bins, y_bins], weights=w)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        if conditional:
+            hist = hist / hist.sum(axis=1, keepdims=True)   # normalise each x column
+        else:
+            hist = hist / hist.sum()
+    im = ax.pcolormesh(xe, ye, hist.T, norm=LogNorm(vmin=1e-4 if conditional else None), cmap='viridis')
+    cbar = ax.figure.colorbar(im, ax=ax, pad=0.04)
+    cbar.set_label(r'$P(y\,|\,x)$ per column' if conditional else 'Weight fraction', fontsize=11)
+
+    if conditional:                                         # median of y in each populated x column
+        centres = 0.5 * (xe[1:] + xe[:-1])
+        idx     = np.digitize(x, xe) - 1                    # x column of each point
+        medians = [np.median(y[idx == i]) if np.any(idx == i) else np.nan for i in range(len(centres))]
+        ax.plot(centres, medians, color='white', lw=2, label='median')
+        ax.legend(fontsize=9, loc='upper left')
+
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    return im
+
+
 
 # ---------------------------------------------------------------------------
 # MAIN
@@ -434,6 +500,8 @@ def main():
     
 
     print(f"\n----------- Inspecting the Colibre snapshot {args.run} -----------")
+    print(f"     Snapshot file                  :     {snap_filename}")
+    print(f"     Figures saved in               :     {save_path}")
     print(f"     Available groups               :     {snap}")
     print(f"     Box size                       :     {meta.boxsize}")
     print(f"     Cosmic Time                    :     {time:.3f} Myr")
@@ -454,16 +522,14 @@ def main():
     sigma_gas = compute_projection_map(snap, field="masses", weight=None, resolution=res, parallel=True)
     fig, ax = plt.subplots()
     plot_projection_map(sigma_gas, ax, Lbox=L_box, units='Msun/kpc**2', cbar_label=r'$\Sigma_{\rm gas} \ [\rm M_\odot \ pkpc^{-2}]$')
-    fig.savefig(os.path.join(save_path, "Visualization2D", "Gas_xy2d_mass_projection.png"), dpi=300)
-    plt.close(fig)
+    save_figure(fig, save_path, "gas", "Gas_xy2d_mass_projection.png")
 
 
     # ---- Mass-weighted gas temperature ----
     T_gas = compute_projection_map(snap, field="temperatures", weight="masses", resolution=res, parallel=True)
     fig, ax = plt.subplots()
     plot_projection_map(T_gas, ax, Lbox=L_box, units='K', cbar_label=r'$\langle T \rangle_{\rm mass} \ [\rm K]$', cmap='inferno')
-    fig.savefig(os.path.join(save_path, "Visualization2D", "Gas_xy2d_temperature_projection.png"), dpi=300)
-    plt.close(fig)
+    save_figure(fig, save_path, "gas", "Gas_xy2d_temperature_projection.png")
 
 
     # ---------------------------------------------------------------------------
@@ -500,21 +566,18 @@ def main():
     ax_m.set_title('Mass-weighted')
     ax_HI.set_title('HI-mass-weighted')
     fig.tight_layout()
-    fig.savefig(os.path.join(save_path, "Diagnostics", "Gas_phase_diagram_nH_T.png"), dpi=300)
-    plt.close(fig)
+    save_figure(fig, save_path, "gas", "Gas_phase_diagram_nH_T.png")
 
     # Single ax for gas and HI mass weight
     fig, ax = plt.subplots()
     plot_phase_diagram(ax, quantities["n_H phys [cm^-3]"], quantities["T [K]"], weights["gas mass"], cbar_label='Gas mass fraction')
     fig.tight_layout()
-    fig.savefig(os.path.join(save_path, "Diagnostics", "Gas_mass_weighted_phase_diagram_nH_T.png"), dpi=300)
-    plt.close(fig)
+    save_figure(fig, save_path, "gas", "Gas_mass_weighted_phase_diagram_nH_T.png")
     
     fig, ax = plt.subplots()
     plot_phase_diagram(ax, quantities["n_H phys [cm^-3]"], quantities["T [K]"], weights["HI mass"],  cbar_label='HI mass fraction')
     fig.tight_layout()
-    fig.savefig(os.path.join(save_path, "Diagnostics", "Gas_massHI_weighted_phase_diagram_nH_T.png"), dpi=300)
-    plt.close(fig)
+    save_figure(fig, save_path, "gas", "Gas_massHI_weighted_phase_diagram_nH_T.png")
 
     # ---- HI maps in a slab: N_HI and HI-weighted properties ----
     slab_thickness = 2.0    # cMpc: avoid summing unrelated absorbers along the whole box
@@ -541,15 +604,13 @@ def main():
     fig.suptitle(rf'Slab: $\Delta L$ = {slab_thickness:.1f} cMpc, centred at $z_{{\rm box}}$ = {z_box_c:.1f} cMpc '
              rf'(redshift $z$ = {redshift:.2f})')
     fig.tight_layout()
-    fig.savefig(os.path.join(save_path, "Visualization2D", "Gas_xy2d_HI_slab_maps.png"), dpi=300)
-    plt.close(fig)
+    save_figure(fig, save_path, "HI", "HI_xy2d_slab_maps.png")
 
     # ---- Pixel distribution of N_HI in the slab ----
     fig, ax = plt.subplots()
     f_LLS, f_DLA = plot_column_density_pixels(ax, N_HI)
     ax.set_title(rf'Slab $\Delta L$ = {slab_thickness} cMpc, {res}$^2$ pixels')
-    fig.savefig(os.path.join(save_path, "Diagnostics", "Gas_NHI_pixel_distribution.png"), dpi=300)
-    plt.close(fig)
+    save_figure(fig, save_path, "HI", "HI_NHI_pixel_distribution.png")
 
     print(f"\n[+] Slab N_HI map ({slab_thickness} cMpc, {res}^2 pixels):")
     print(f"     Pixel fraction N_HI >= LLS     :     {f_LLS:.3e}")
@@ -603,6 +664,28 @@ def main():
     print(f"\n[+] Gas that has been part of the ISM (recycled / outflow tracer):")
     for w_label, w_values in abundance_weights.items():
         print(f"     {w_label + ' fraction':<31}:     {w_values[was_in_ISM].sum() / w_values.sum():.3e}")
+
+    # M2 figures: where are the metals among the particles, and in which gas phase
+    fig, axs = plt.subplots(1, 3, figsize=(18, 5))
+    plot_weighted_pdf(axs[0], abundances["[O/H] gas"], abundance_weights, bins=np.arange(-8, 1.01, 0.1),
+                      xlabel=r'$[\rm O/H]_{\rm gas}$ (particles)')
+    plot_weighted_pdf(axs[1], abundances["[Fe/O] gas"], abundance_weights, bins=np.arange(-2, 1.01, 0.05),
+                      xlabel=r'$[\rm Fe/O]_{\rm gas}$ (particles)')
+    plot_weighted_pdf(axs[2], abundances["z_enrich"], {"metal mass": abundance_weights["metal mass"]},
+                      bins=np.arange(5, 20.01, 0.25), xlabel=r'metal-mass-weighted enrichment redshift $\bar z_Z$')
+    fig.suptitle(rf'Particle abundances (redshift $z$ = {redshift:.2f})')
+    fig.tight_layout()
+    save_figure(fig, save_path, "metal_diag", "Metals_particle_abundance_pdfs.png")
+
+    fig, axs = plt.subplots(1, 2, figsize=(13, 5))
+    for ax, w_label in zip(axs, ["gas mass", "HI mass"]):
+        plot_hist2d(ax, np.log10(quantities["n_H phys [cm^-3]"]), abundances["[O/H] gas"],
+                    x_bins=np.arange(-6, 4.01, 0.1), y_bins=np.arange(-8, 1.01, 0.1),
+                    xlabel=r'$\log_{10} \ n_{\rm H} \ [\rm cm^{-3}]$', ylabel=r'$[\rm O/H]_{\rm gas}$',
+                    weights=abundance_weights[w_label])
+        ax.set_title(f'{w_label}-weighted (lowest row: [O/H] < -8 or pristine)')
+    fig.tight_layout()
+    save_figure(fig, save_path, "metal_diag", "Metals_nH_vs_OH_particles.png")
     del ratio, abundances
 
     # ---- M3: element column densities in the slab ----
@@ -650,8 +733,30 @@ def main():
     plot_projection_map(N_Fe, axs[1, 2], Lbox=L_box, units='cm**-2', cbar_label=r'$N_{\rm Fe}^{\rm gas} \ [\rm cm^{-2}]$', cmap='cividis', vmin=1e7)
     fig.suptitle(rf'Metals in the slab: $\Delta L$ = {slab_thickness:.1f} cMpc (redshift $z$ = {redshift:.2f}); white/grey = pristine (X = 0)')
     fig.tight_layout()
-    fig.savefig(os.path.join(save_path, "Visualization2D", "Metals_xy2d_slab_columns.png"), dpi=300)
-    plt.close(fig)
+    save_figure(fig, save_path, "metal_maps", "Metals_xy2d_slab_columns.png")
+
+    # Enrichment redshift map, weighted by the metal mass that has a recorded enrichment event
+    # (metals received only by diffusion have z_enrich = -1 and get weight 0)
+    # The snapshot field is flagged as physical (comoving=False) and cannot be multiplied by comoving masses:
+    # re-wrap the same values as a comoving, scale-independent (a^0) dimensionless cosmo_array.
+    z_values = snap.gas.mean_metal_weighted_redshifts.value
+    snap.gas.z_enrich  = sw.cosmo_array(z_values, "dimensionless", comoving=True, scale_factor=meta.a, scale_exponent=0)
+    dated = (z_values >= 0).astype(np.float32)
+    snap.gas.m_Z_dated = snap.gas.masses * snap.gas.metal_mass_fractions * dated
+    zZ_map = compute_projection_map(snap, field="z_enrich", weight="m_Z_dated", **slab_kwargs)
+
+    fig, axs = plt.subplots(2, 3, figsize=(18, 10))
+    plot_abundance_map(abundance_maps["[O/H]_col"], axs[0, 0], Lbox=L_box, cbar_label=r'$[\rm O/H]_{\rm col}$ (all O, all H)')
+    plot_abundance_map(abundance_maps["[C/O]"],     axs[0, 1], Lbox=L_box, cbar_label=r'$[\rm C/O]_{\rm gas}$',  vmin=-1.0, vmax=0.0)
+    plot_abundance_map(abundance_maps["[Si/O]"],    axs[0, 2], Lbox=L_box, cbar_label=r'$[\rm Si/O]_{\rm gas}$', vmin=-0.5, vmax=0.5)
+    plot_abundance_map(abundance_maps["[Fe/O]"],    axs[1, 0], Lbox=L_box, cbar_label=r'$[\rm Fe/O]_{\rm gas}$', vmin=-1.5, vmax=0.5)
+    plot_abundance_map(abundance_maps["delta_Fe"],  axs[1, 1], Lbox=L_box, cbar_label=r'$\delta_{\rm Fe}$ (column)', vmin=-0.5, vmax=0.0, cmap="viridis")
+    plot_projection_map(zZ_map, axs[1, 2], Lbox=L_box, units='dimensionless', log=False, vmin=5, vmax=12,
+                        cmap='plasma', cbar_label=r'$\bar z_Z$ (metal-mass weighted)')
+    fig.suptitle(rf'Abundance ratios in the slab: $\Delta L$ = {slab_thickness:.1f} cMpc (redshift $z$ = {redshift:.2f}); grey/white = pristine')
+    fig.tight_layout()
+    save_figure(fig, save_path, "metal_maps", "Metals_xy2d_slab_ratios.png")
+    del snap.gas.m_Z_dated, snap.gas.z_enrich
 
     # ---- M4: absorber classes ----
     print_absorber_classes(logN_HI, abundance_maps)
@@ -662,8 +767,20 @@ def main():
     plot_class_histograms(axs[2], logN_HI, abundance_maps["[Fe/O]"],   r'$[\rm Fe/O]_{\rm gas}$', bins=np.arange(-2, 1.01, 0.05))
     fig.suptitle(rf'Metallicity of optically thick absorbers (slab {slab_thickness:.1f} cMpc, redshift $z$ = {redshift:.2f})')
     fig.tight_layout()
-    fig.savefig(os.path.join(save_path, "Diagnostics", "Metals_abundances_by_absorber_class.png"), dpi=300)
-    plt.close(fig)
+    save_figure(fig, save_path, "metal_diag", "Metals_abundances_by_absorber_class.png")
+
+    # Key JAGGER-like diagnostic: absorber metallicity as a function of N_HI (one point per pixel)
+    fig, axs = plt.subplots(1, 2, figsize=(14, 5))
+    for ax, key, label in zip(axs, ["[O/H]_HI", "[O/H]_col"],
+                              [r'$[\rm O/H]_{\rm HI}$ (neutral gas, OI/HI-like)', r'$[\rm O/H]_{\rm col}$ (all gas)']):
+        plot_hist2d(ax, logN_HI.ravel(), abundance_maps[key].ravel(),
+                    x_bins=np.arange(14, 22.01, 0.1), y_bins=np.arange(-8, 1.01, 0.1),
+                    xlabel=r'$\log_{10} \ N_{\rm HI} \ [\rm cm^{-2}]$', ylabel=label, conditional=True)
+        for logN in [17.2, 19.0, 20.3]:                      # LLS, subDLA, DLA boundaries
+            ax.axvline(logN, color='red', ls='--', lw=1)
+    fig.suptitle(rf'Metallicity vs $N_{{\rm HI}}$ per pixel (lowest row: [O/H] < -8 or pristine; redshift $z$ = {redshift:.2f})')
+    fig.tight_layout()
+    save_figure(fig, save_path, "metal_diag", "Metals_OH_vs_NHI_pixels.png")
 
 
 
