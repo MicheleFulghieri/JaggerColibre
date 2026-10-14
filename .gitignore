@@ -68,3 +68,9 @@ compile_commands.json
 # outputs 
 outputs/
 run/
+
+# large external tables (downloaded, not versioned)
+tables/
+
+# python bytecode
+__pycache__/
