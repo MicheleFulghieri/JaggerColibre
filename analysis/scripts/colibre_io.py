@@ -20,7 +20,8 @@ FIG_DIRS = {
     "HI"         : "02_HI",                                    # slab HI maps, N_HI distribution
     "metal_maps" : os.path.join("03_Metals", "Maps"),          # slab column and abundance maps
     "metal_diag" : os.path.join("03_Metals", "Diagnostics"),   # distributions, absorber classes
-    "ions_model0": os.path.join("04_Ions", "Model0"),          # analytic HI equilibrium vs CHIMES
+    "HI_models"  : os.path.join("04_Ions", "HI_models"),       # equilibrium HI models vs CHIMES (validation)
+    "metal_ions" : os.path.join("04_Ions", "Metal_ions"),      # metal ion fractions (prediction)
 }
 
 

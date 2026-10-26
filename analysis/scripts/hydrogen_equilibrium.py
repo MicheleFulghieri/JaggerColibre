@@ -1,25 +1,19 @@
-"""Ionisation state of the gas, model 0 (step I0b of the roadmap).
+"""Analytic hydrogen ionisation equilibrium, model 0 (step I0b of the roadmap).
 
-   1) Analytic hydrogen equilibrium with photoionisation, collisional ionisation and recombination,
-      for a given HI photoionisation rate Gamma (HM12 or COLIBRE UV background), optionally reduced
-      by self-shielding (Rahmati et al. 2013).
-   2) Tabulated ion fractions of Trident (CLOUDY, HM12 background; optically thin or self-shielded)."""
+   HI photoionisation rate of the UV background (HM12 or COLIBRE/PS20), recombination and collisional
+   ionisation coefficients, self-shielding (Rahmati et al. 2013) and the equilibrium neutral fraction.
+   Tabulated ion fractions (COLIBRE and Trident tables) are in ion_tables.py."""
 
 import os
 import glob
 
 import numpy as np
 import h5py
-from scipy.interpolate import RegularGridInterpolator
 
 
 DATA_DIR        = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data")
 HM12_RATES_FILE = os.path.join(DATA_DIR, "hm12_photorates.txt")    # Haardt & Madau 2012, Table 3 (from the rabacus package)
-COLIBRE_UVB_DIR = "/cosma8/data/dp004/jlvc76/COLIBRE/Tables/chimes-data/SP20_cross_sections"
-TRIDENT_TABLES  = {
-    "HM12 thin" : "/cosma8/data/do019/dc-fulg1/tables/trident/hm2012_hr.h5",      # optically thin
-    "HM12 ss"   : "/cosma8/data/do019/dc-fulg1/tables/trident/hm2012_ss_hr.h5",   # self-shielded
-}
+COLIBRE_UVB_DIR = "/cosma8/data/dp004/colibre/Tables/chimes-data/SP20_cross_sections"
 
 SPEED_OF_LIGHT = 2.99792458e10     # cm/s
 T_ION_HI       = 157807.0          # K, HI ionisation potential (13.6 eV) / k_B
@@ -92,26 +86,3 @@ def equilibrium_f_HI(n_H, T, gamma, eta):
     C = alpha * k
     return 2.0 * C / (B + np.sqrt(np.maximum(B**2 - 4.0 * A * C, 0.0)))
 
-
-# ---------------------------------------------------------------------------
-# Trident (CLOUDY) ion tables
-# ---------------------------------------------------------------------------
-def trident_ion_fraction(table_name, element, stage, z, n_H, T):
-    """Ion fraction n_ion / n_element from a Trident table, at redshift z, for arrays n_H [cm^-3] and T [K].
-       element: dataset name ('H', 'C', 'O', 'Mg', 'Al', 'Si', 'Fe', ...); stage: 1 = neutral (I), 2 = II, ...
-       Table axes: [stage, log n_H, z, log T]; values: log10 of the ion fraction.
-       The table is first interpolated linearly in z, then bilinearly in (log n_H, log T);
-       points outside the grid take the value at the edge."""
-    with h5py.File(TRIDENT_TABLES[table_name], "r") as f:
-        dset   = f[element]
-        log_n  = dset.attrs["Parameter1"]
-        z_grid = dset.attrs["Parameter2"]
-        log_T  = dset.attrs["Temperature"]
-        i = np.clip(np.searchsorted(z_grid, z) - 1, 0, len(z_grid) - 2)   # z_grid[i] <= z < z_grid[i+1]
-        w = (z - z_grid[i]) / (z_grid[i + 1] - z_grid[i])
-        table = (1 - w) * dset[stage - 1, :, i, :] + w * dset[stage - 1, :, i + 1, :]   # (n_H, T) at redshift z
-
-    interp = RegularGridInterpolator((log_n, log_T), table)
-    points = np.column_stack([np.clip(np.log10(n_H), log_n[0], log_n[-1]),
-                              np.clip(np.log10(T),   log_T[0], log_T[-1])])
-    return 10**interp(points)

@@ -47,3 +47,16 @@ def print_weighted_statistics(quantities, weights):
             p16, p50, p84 = weighted_percentiles(q_values, w_values)
             mean, std     = weighted_mean_std(q_values, w_values)
             print(f"     {q_label:<{w}}  {p16:10.3e} {p50:10.3e} {p84:10.3e} {mean:10.3e} {std:10.3e} {f_fin:7.3f}")
+
+
+def binned_percentiles(x, y, weights, x_bins, percentiles=(16, 50, 84)):
+    """Weighted percentiles of y in bins of x. Returns bin centres and an array (n_bins, n_percentiles);
+       empty bins are nan."""
+    centres = 0.5 * (x_bins[1:] + x_bins[:-1])
+    out = np.full((len(centres), len(percentiles)), np.nan)
+    idx = np.digitize(x, x_bins) - 1
+    for i in range(len(centres)):
+        sel = idx == i
+        if np.any(sel & np.isfinite(y)):
+            out[i] = weighted_percentiles(y[sel], weights[sel], percentiles)
+    return centres, out

@@ -1,4 +1,4 @@
-"""Elements, dust and metallicity diagnostics (block M of the roadmap)."""
+"""Elements, dust and metallicity diagnostics """
 
 import numpy as np
 import h5py
@@ -25,7 +25,7 @@ def print_metal_budget(gas, snap_filename):
        for all atoms (tot) and for the gas phase only (gas).
        X_dust,el = sum_g D_g * M[g, el], M = GrainToElementMapping (grain -> element mass fractions)."""
     with h5py.File(snap_filename, "r") as f:
-        grain_to_element = f["SubgridScheme/GrainToElementMapping"][:]            # (6 grains, 12 elements)
+        grain_to_element = f["SubgridScheme/GrainToElementMapping"][:]           # (6 grains, 12 elements)
     elements = gas.element_mass_fractions.named_columns                          # same order as the matrix columns
     D = np.column_stack([getattr(gas.dust_mass_fractions, g).value.astype(np.float64)
                          for g in gas.dust_mass_fractions.named_columns])        # (N particles, 6 grains)
