@@ -1,4 +1,4 @@
-"""Driver: metal ions observed by JAGGER (step I1b of the roadmap, prediction).
+"""Driver: metal ions observed by JAGGER.
    Fraction of each gas-phase element in the ion, from the COLIBRE equilibrium tables (prediction)
    and from the Trident/CLOUDY HM12 tables (model systematic). No non-equilibrium reference exists:
    in the COLIBRE runs CHIMES follows only H and He (CHIMESCooling:Include<Element> = 0)."""

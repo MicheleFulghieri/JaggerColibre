@@ -72,5 +72,8 @@ run/
 # large external tables (downloaded, not versioned)
 tables/
 
+# annotations
+docs/
+
 # python bytecode
 __pycache__/

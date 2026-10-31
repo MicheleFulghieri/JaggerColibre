@@ -1,4 +1,4 @@
-"""Driver: neutral hydrogen, equilibrium models vs CHIMES (steps I0b and I1 of the roadmap, validation).
+"""Driver: neutral hydrogen, equilibrium models vs CHIMES.
    Neutral fraction f_HI from analytic equilibrium (HM12 or COLIBRE/PS20 UV background, with/without
    Rahmati self-shielding), from the COLIBRE equilibrium tables and from the Trident/CLOUDY HM12 tables,
    compared with the non-equilibrium CHIMES f_HI stored in the snapshot."""
