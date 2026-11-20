@@ -9,7 +9,6 @@ from scipy.integrate import quad
 
 KERNEL_CONSTANT = 15625.0 / (512.0 * np.pi)      # 3D normalisation C
 
-
 def quartic_spline(x):
     """Dimensionless M5 kernel shape w(x), x = r / H. Zero for x >= 1."""
     x = np.asarray(x, dtype=np.float64)
@@ -24,19 +23,11 @@ def kernel_3d(r, h, gamma):
     return KERNEL_CONSTANT * quartic_spline(r / H) / H**3
 
 if __name__ == "__main__":
-    # Normalisation: int_0^1 4 pi x^2 C w(x) dx must be 1 (H cancels)
-
-    # Trapezoid integral
-    for n in [101, 1001, 10001]:
-        x = np.linspace(0.0, 1.0, n)
-        norm = np.trapezoid(4.0 * np.pi * x**2 * KERNEL_CONSTANT * quartic_spline(x), x)
-        print(f"Trapezoid, N = {n:6d}   : {norm:.8f}")
-
-    # scipy quad integral
+    # Normalisation: int_0^1 4 pi x^2 C w(x) dx must be 1 (H cancels)    
     norm, err = quad(lambda x: 4.0 * np.pi * x**2 * KERNEL_CONSTANT * quartic_spline(x), 0.0, 1.0,
                      points=[0.2, 0.6]) # points identifies the sub-intervals where fourth derivative exhibits a jump, to make adaptive integration more precise
 
-    print(f"scipy quad            : {norm:.10f}  (error estimate {err:.1e})")
+    print(f"scipy quad                 : {norm:.10f}  (error estimate {err:.1e})")
     print(f"w(0), w(0.6), w(1), w(1.5) : {quartic_spline([0.0, 0.6, 1.0, 1.5])}")
 
 
