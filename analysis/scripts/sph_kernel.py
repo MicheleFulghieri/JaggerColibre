@@ -4,7 +4,6 @@
    w(x) = (1-x)^4_+ - 5 (3/5-x)^4_+ + 10 (1/5-x)^4_+,  (y)_+ = max(y, 0),  C = 15625 / (512 pi)."""
 
 import numpy as np
-import matplotlib.pyplot as plt
 from scipy.integrate import quad
 
 from colibre_io import save_figure
@@ -32,19 +31,6 @@ if __name__ == "__main__":
     print(f"scipy quad                 : {norm:.10f}  (error estimate {err:.1e})")
     print(f"w(0), w(0.6), w(1), w(1.5) : {quartic_spline([0.0, 0.6, 1.0, 1.5])}")
 
-    # # Kernel visualization
-    # x = np.linspace(0.0, 1.0, 500)
-    # quartic_spline = quartic_spline(x)
-    # kernel = 4.0 * np.pi * x**2 * KERNEL_CONSTANT * quartic_spline(x)
-
-    # fig, ax = plt.subplots()
-    # ax.plot(x, quartic_spline, 'b--', linewidth=1.6, label='Quartic Spline (M5)')
-    # ax.plot(x, kernel, color='red', label='Quartic Spline (M5)')
-    # ax.legend(fontsize=9)
-    # ax.grid(True, which='both', alpha=0.3)
-    # fig.tight_layout()
-
-    # save_figure(fig, save_path, "LoS", "M5_kernel.png")
     
 
 
