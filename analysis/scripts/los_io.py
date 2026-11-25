@@ -28,20 +28,24 @@ LOS_FIELDS = {
     "MetalMassFractions"          : "Z",          # total metal mass fraction
 }
 
-# Return (redshift array, file list) sorted by the name of the file
-def los_redshifts(los_dir=LOS_DIR):
-    """Redshift of every LOS file in los_dir and the file names, sorted by file number."""
-    files = sorted(glob.glob(os.path.join(los_dir, "los_*.hdf5")))
-    z = np.empty(len(files))
-    for i, fn in enumerate(files):
+def los_catalogue(los_dir=LOS_DIR, zmin=4.0, zmax=5.5):
+    """Header-only scan of the LOS files with zmin <= z <= zmax.
+       Returns file numbers, redshifts and number of sightlines along x, y, z (shape (n, 3))."""
+    numbers, z, per_axis = [], [], []
+    for fn in sorted(glob.glob(os.path.join(los_dir, "los_*.hdf5"))):
         with h5py.File(fn, "r") as f:
-            z[i] = f["Header"].attrs["Redshift"][0]
-    return z, files
-
+            z_file = f["Header"].attrs["Redshift"][0]
+            if not zmin <= z_file <= zmax:
+                continue
+            axes = [f[g].attrs["Zaxis"][0] for g in f if g.startswith("LOS_")]
+        numbers.append(int(os.path.basename(fn)[4:8]))
+        z.append(z_file)
+        per_axis.append(np.bincount(axes, minlength=3))
+    return np.array(numbers), np.array(z), np.array(per_axis)
 
 def read_sightline(filename, index):
     """One sightline as a dictionary: metadata plus particle arrays (float64, physical CGS).
-       The sightline uns along the axis whose index is axes[2] (0 = x, 1 = y, 2 = z) and
+       The sightline runs along the axis whose index is axes[2] (0 = x, 1 = y, 2 = z) and
        crosses the perpendicular plane at (xpos, ypos) along (axes[0], axes[1])."""
     with h5py.File(filename, "r") as f:
         header = f["Header"].attrs
