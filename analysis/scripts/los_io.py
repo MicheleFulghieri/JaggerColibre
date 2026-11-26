@@ -1,8 +1,8 @@
-"""Reading of the COLIBRE line-of-sight (LOS) outputs.
+"""Gas for sightline analyses, from two sources.
 
-   Each file los_XXXX.hdf5 holds, for one output time, 105 sightlines (35 parallel to each axis).
-   Group LOS_YYYY contains all gas particles whose SPH kernel intersects that sightline.
-   Every dataset carries the factor that converts it to physical CGS units (cosmological a-factors included)."""
+   1) Native COLIBRE LOS files (legacy, kept for consistency checks): each los_XXXX.hdf5 holds 105 sightlines
+      (35 per axis); group LOS_YYYY contains the gas particles whose kernel intersects it. Read in physical CGS.
+   2) Snapshots (built sightlines): all gas particles, in internal comoving units (cMpc, km/s, 1e10 Msun)."""
 
 import os
 import glob
@@ -28,6 +28,9 @@ LOS_FIELDS = {
     "MetalMassFractions"          : "Z",          # total metal mass fraction
 }
 
+# ---------------------------------------------------------------------------
+# Native COLIBRE LOS files (legacy: kept for consistency checks)
+# ---------------------------------------------------------------------------
 def los_catalogue(los_dir=LOS_DIR, zmin=4.0, zmax=5.5):
     """Header-only scan of the LOS files with zmin <= z <= zmax.
        Returns file numbers, redshifts and number of sightlines along x, y, z (shape (n, 3))."""
@@ -67,3 +70,33 @@ def read_sightline(filename, index):
             los[key] = dset[:].astype(np.float64) * dset.attrs[CGS_FACTOR][0] # adds a new entry to the dict with key "pos" and the array in cgs
     return los # dic with 10 medatadata and 11 array
 
+# ---------------------------------------------------------------------------
+# Gas from snapshots (built sightlines)
+# ---------------------------------------------------------------------------
+def read_gas(filename):
+    """Gas fields needed for sightlines, in internal comoving units (cMpc, km/s, 1e10 Msun), plus metadata."""
+    with h5py.File(filename, "r") as f:
+        cosmo = f["Cosmology"].attrs
+        gas = {
+            "z"        : cosmo["Redshift"][0],
+            "a"        : cosmo["Scale-factor"][0],
+            "Hz"       : cosmo["H [internal units]"][0],                                     # km/s/Mpc
+            "rho_crit0": cosmo["Critical density at redshift zero [internal units]"][0],     # 1e10 Msun / cMpc^3
+            "L"        : f["Header"].attrs["BoxSize"][0],                                    # cMpc
+            "gamma"    : f["HydroScheme"].attrs["Kernel gamma"][0],
+        }
+        elements = [s.decode() for s in f["SubgridScheme/NamedColumns/ElementMassFractions"][:]]
+        species  = [s.decode() for s in f["SubgridScheme/NamedColumns/SpeciesFractions"][:]]
+
+        part = f["PartType0"]
+        gas["pos"]  = part["Coordinates"][:]                                          # cMpc, (N, 3), float64
+        gas["vel"]  = part["Velocities"][:]                                           # km/s, peculiar, (N, 3)
+        gas["mass"] = part["Masses"][:]                                               # 1e10 Msun
+        gas["T"]    = part["Temperatures"][:]                                         # K
+        h           = part["SmoothingLengths"][:]                                     # cMpc
+        X_H         = part["ElementMassFractions"][:, elements.index("Hydrogen")]     # one column only
+        x_HI        = part["SpeciesFractions"][:, species.index("HI")]                # n_HI / n_H
+
+    gas["H"]    = gas["gamma"] * h                     # kernel radius, cMpc
+    gas["m_HI"] = gas["mass"] * X_H * x_HI             # HI mass, 1e10 Msun
+    return gas

@@ -1,4 +1,6 @@
-"""Driver: read one or more COLIBRE lines of sight of the same output and summarise each in a table row."""
+"""Driver for sightline analyses.
+   Native mode (legacy): summarise the native COLIBRE LOS files (--list, --file, --los, --save).
+   Snapshot mode (--snap): read the gas of a snapshot for our own sightlines."""
 
 import os
 import argparse
@@ -6,19 +8,21 @@ import argparse
 import numpy as np
 from astropy import constants as const
 
-from los_io import LOS_DIR, los_catalogue, read_sightline
+from colibre_io import DEFAULT_SNAP_DIR
+from los_io import LOS_DIR, los_catalogue, read_gas, read_sightline
 from weighted_stats import weighted_percentiles
 
 MSUN_G = const.M_sun.cgs.value      # g
 M_H_G  = const.m_p.cgs.value        # g, proton mass (H atom mass to 0.05%)
 
-
 def parse_args():
-    p = argparse.ArgumentParser(description="Summarise COLIBRE sightlines of one LOS output")
+    p = argparse.ArgumentParser(description="Sightline analyses: native COLIBRE LOS files or own sightlines from snapshots")
     p.add_argument("--file", type=int, default=51, help="LOS output number (51 -> los_0051.hdf5, z = 5.02)")
     p.add_argument("--list", action="store_true", help="list the LOS files in 4 <= z <= 5.5 and exit")
     p.add_argument("--los",  type=int, nargs="+", default=[0], help="one or more sightline indices (0-104)")
     p.add_argument("--save", default=None, help="text file for the summary table (optional)")
+    p.add_argument("--snap", type=int, default=None, help="snapshot number: build own sightlines from this snapshot")
+    p.add_argument("--run",  default="L0025N0188/Thermal", help="run directory relative to the COLIBRE Runs folder")
     return p.parse_args()
 
 def summarise_sightline(filename, index):
@@ -59,9 +63,25 @@ def summarise_sightline(filename, index):
         "lognH_HI_med" : weighted_percentiles(log_nH, m_HI, (50,))[0],
     }
 
+def check_gas(filename):
+    """Read the gas of a snapshot and print the checks (box in velocity, Omega_HI, memory)."""
+    gas      = read_gas(filename)
+    box_kms  = gas["a"] * gas["Hz"] * gas["L"]                                         # box length in velocity
+    Omega_HI = np.sum(gas["m_HI"], dtype=np.float64) / (gas["L"]**3 * gas["rho_crit0"]) # convert to double precision (float64) if masses saved in float32, 4 byte single precision to save mem
+    n_part   = gas["mass"].size
+    nbytes   = sum(v.nbytes for v in gas.values() if isinstance(v, np.ndarray))
+
+    print(f"\n[+] Gas read from {filename}")
+    print(f"     z, a, H(z) [km/s/Mpc]          :     {gas['z']:.3f}, {gas['a']:.4f}, {gas['Hz']:.2f}")
+    print(f"     Box [cMpc], in velocity [km/s] :     {gas['L']:.2f}, {box_kms:.1f}")
+    print(f"     Gas particles                  :     {n_part}")
+    print(f"     Omega_HI                       :     {Omega_HI:.3e}")
+    print(f"     Memory of the arrays           :     {nbytes / 1e9:.2f} GB "
+          f"({nbytes / n_part:.0f} B/particle -> m5: {nbytes / n_part * 4.24e8 / 1e9:.0f} GB)")
 
 def main():
-    args     = parse_args()
+    args = parse_args()
+
     if args.list:
         numbers, z, per_axis = los_catalogue()
         print(f"\n[+] {numbers.size} LOS files in {LOS_DIR}")
@@ -69,6 +89,11 @@ def main():
             print(f"     los_{n:04d}   z = {zi:.3f}   LOS along x/y/z = {c}")
         a = 1.0 / (1.0 + z)
         print(f"     Cadence a_(i+1)/a_i = 1.01, no gaps: {np.allclose(a[1:] / a[:-1], 1.01, rtol=1e-3)}")
+        return
+
+    if args.snap is not None:
+        filename = os.path.join(DEFAULT_SNAP_DIR, args.run, "SOAP-HBT", f"colibre_with_SOAP_membership_{args.snap:04d}.hdf5")
+        check_gas(filename)
         return
 
     filename = os.path.join(LOS_DIR, f"los_{args.file:04d}.hdf5")
