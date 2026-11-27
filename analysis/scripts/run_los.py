@@ -10,6 +10,7 @@ from astropy import constants as const
 
 from colibre_io import DEFAULT_SNAP_DIR
 from los_io import LOS_DIR, los_catalogue, read_gas, read_sightline
+from sightlines import select_particles
 from weighted_stats import weighted_percentiles
 
 MSUN_G = const.M_sun.cgs.value      # g
@@ -23,6 +24,8 @@ def parse_args():
     p.add_argument("--save", default=None, help="text file for the summary table (optional)")
     p.add_argument("--snap", type=int, default=None, help="snapshot number: build own sightlines from this snapshot")
     p.add_argument("--run",  default="L0025N0188/Thermal", help="run directory relative to the COLIBRE Runs folder")
+    p.add_argument("--axis", type=int, choices=[0, 1, 2], default=2, help="sightline direction (0 = x, 1 = y, 2 = z)")
+    p.add_argument("--xy",   type=float, nargs=2, default=[5.0, 5.0], help="sightline position on the two perpendicular axes [cMpc]")
     return p.parse_args()
 
 def summarise_sightline(filename, index):
@@ -63,9 +66,8 @@ def summarise_sightline(filename, index):
         "lognH_HI_med" : weighted_percentiles(log_nH, m_HI, (50,))[0],
     }
 
-def check_gas(filename):
-    """Read the gas of a snapshot and print the checks (box in velocity, Omega_HI, memory)."""
-    gas      = read_gas(filename)
+def check_gas(filename, gas):
+    """Print the checks on the gas of a snapshot (box in velocity, Omega_HI, memory)."""
     box_kms  = gas["a"] * gas["Hz"] * gas["L"]                                         # box length in velocity
     Omega_HI = np.sum(gas["m_HI"], dtype=np.float64) / (gas["L"]**3 * gas["rho_crit0"]) # convert to double precision (float64) if masses saved in float32, 4 byte single precision to save mem
     n_part   = gas["mass"].size
@@ -91,9 +93,17 @@ def main():
         print(f"     Cadence a_(i+1)/a_i = 1.01, no gaps: {np.allclose(a[1:] / a[:-1], 1.01, rtol=1e-3)}")
         return
 
-    if args.snap is not None:
-        filename = os.path.join(DEFAULT_SNAP_DIR, args.run, "SOAP-HBT", f"colibre_with_SOAP_membership_{args.snap:04d}.hdf5")
-        check_gas(filename)
+    if args.snap is not None:                              # own sightlines from a snapshot
+        filename = os.path.join(DEFAULT_SNAP_DIR, args.run, "SOAP-HBT",
+                                f"colibre_with_SOAP_membership_{args.snap:04d}.hdf5")
+        gas = read_gas(filename)
+        check_gas(filename, gas)
+
+        idx, b = select_particles(gas, args.axis, *args.xy)
+        H_sel  = gas["H"][idx]
+        print(f"\n[+] Sightline along axis {args.axis} at {args.xy} cMpc")
+        print(f"     Particles intersecting it                            :     {idx.size} ({idx.size / gas['mass'].size:.2e} of all)")
+        print(f"     Kernel radius (H) range of these particles [cMpc]    :     [{H_sel.min():.3e} - {H_sel.max():.3e}]")
         return
 
     filename = os.path.join(LOS_DIR, f"los_{args.file:04d}.hdf5")
